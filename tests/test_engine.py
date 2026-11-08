@@ -25,11 +25,13 @@ def test_scan_keeps_user_data_and_skips_regenerable(hermes_home):
     assert not any("__pycache__" in p for p in r)
 
 
-def test_scan_excludes_credentials_by_default(hermes_home):
+def test_scan_never_captures_credentials(hermes_home):
+    """Review #149640: Hermes credential files are never read, opt-in or not."""
     r = rels(hermes_home)
     assert ".env" not in r and "auth.json" not in r and "profiles/work/.env" not in r
-    r2 = rels(hermes_home, include_secrets=True)
-    assert {".env", "auth.json", "profiles/work/.env"} <= r2
+    import inspect
+    from arkcore.scanner import scan
+    assert "include_secrets" not in inspect.signature(scan).parameters
 
 
 def test_scan_skips_symlinks_and_own_repo(hermes_home, tmp_path):
@@ -165,9 +167,13 @@ def test_large_file_is_chunked_and_partially_deduped(hermes_home, tmp_path):
     assert res.blobs_new == 1 and res.bytes_new == 1 << 20     # only that chunk re-stored
 
 
-def test_secrets_refused_in_unencrypted_repo(hermes_home, tmp_path):
-    repo = Repository.init(LocalBackend(tmp_path / "repo"), None)
-    with pytest.raises(ValueError):
+def test_credentials_never_captured_even_in_an_encrypted_repo(hermes_home, tmp_path):
+    repo = Repository.init(LocalBackend(tmp_path / "repo"), "pw-12345678")
+    sid = create_snapshot(repo, hermes_home).snapshot_id
+    m = repo.load_manifest(sid)
+    paths = {e["p"] for e in m["files"]}
+    assert not paths & {".env", "auth.json", "profiles/work/.env"} and m["secrets"] is False
+    with pytest.raises(TypeError):
         create_snapshot(repo, hermes_home, include_secrets=True)
 
 

@@ -91,27 +91,24 @@ def create_snapshot(
     *,
     label: str = "",
     trigger: str = "manual",
-    include_secrets: bool = False,
     extra_excludes: Iterable[str] = (),
     skip_if_unchanged: bool = False,
     scope: Optional[Iterable[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> SnapshotResult:
-    """Capture *root* into *repo*. Credentials are refused unless the repo is encrypted.
+    """Capture *root* into *repo*. Credential stores are never captured.
 
     *scope* limits the snapshot to some kinds (e.g. ``BRAIN``: memory, soul, skills, config, cron) —
     fast enough to run before every memory/skill write. A scoped snapshot records its scope, and a
     restore from it never touches anything outside that scope.
     """
-    if include_secrets and not repo.encrypted:
-        raise ValueError("refusing to store credentials in an unencrypted repository")
     started = time.monotonic()
     root = Path(root)
     scope_set = frozenset(scope) if scope is not None else None
     entries, skipped, skip_reasons = [], [], []
     total = new_bytes = new_blobs = 0
     top = dirs_for_kinds(scope_set) if scope_set is not None else None
-    found = list(scan(root, include_secrets=include_secrets, extra_excludes=extra_excludes, top_dirs=top))
+    found = list(scan(root, extra_excludes=extra_excludes, top_dirs=top))
     roots = skill_roots(e.rel for e in found)
     for entry in found:
         if scope_set is not None and classify(entry.rel, roots)[1] not in scope_set:
@@ -133,7 +130,7 @@ def create_snapshot(
         total += size
         profile, kind, item = classify(entry.rel, roots)
         entries.append({"p": entry.rel, "s": size, "m": entry.mode, "t": entry.mtime_ns, "b": ids,
-                        "k": kind, "i": item, "pr": profile, **({"x": 1} if entry.secret else {})})
+                        "k": kind, "i": item, "pr": profile})
         if progress:
             progress(entry.rel)
 
@@ -152,7 +149,7 @@ def create_snapshot(
         "trigger": trigger,
         "host": socket.gethostname(),
         "root": str(root),
-        "secrets": include_secrets,
+        "secrets": False,
         "scope": sorted(scope_set) if scope_set is not None else None,
         "files": entries,
         # Files that existed but could not be read: a restore must never treat them as "added later".

@@ -38,7 +38,7 @@ def op_status() -> str:
                 "   Automatic snapshots are paused until then; chats keep working normally.")
     snaps = list_snapshots(repo)
     lines = [f"🛡  Ark repository: {st.repository}",
-             f"   encryption: {'AES-256-GCM 🔒' if repo.encrypted else 'off ⚠'} · credentials: {'included' if st.include_secrets else 'excluded'}",
+             f"   encryption: {'AES-256-GCM 🔒' if repo.encrypted else 'off ⚠'} · credentials: never captured",
              f"   snapshots: {len(snaps)}"]
     if snaps:
         last = snaps[-1]
@@ -68,16 +68,13 @@ def op_status() -> str:
 def op_snapshot(label: str = "", trigger: str = "manual", skip_if_unchanged: bool = False) -> str:
     st = S.load()
     repo = S.open_repo(st)
-    include = st.include_secrets and repo.encrypted
     with repo_lock(S.lock_path(st)):
-        res = create_snapshot(repo, S.hermes_home(), label=label, trigger=trigger, include_secrets=include,
+        res = create_snapshot(repo, S.hermes_home(), label=label, trigger=trigger,
                               extra_excludes=S.excludes(st), skip_if_unchanged=skip_if_unchanged)
     if res.unchanged:
         return f"✓ Nothing changed since {res.snapshot_id}; no new snapshot needed."
     msg = (f"✓ Snapshot {res.snapshot_id}: {res.files} files, {human_size(res.bytes_total)} "
            f"(new data {human_size(res.bytes_new)}) in {res.seconds:.1f}s")
-    if st.include_secrets and not repo.encrypted:
-        msg += "\n⚠ Credentials were NOT included: the repository is not encrypted."
     if res.skipped:
         msg += f"\n⚠ {len(res.skipped)} file(s) could not be read: " + "; ".join(res.skipped[:5])
     return msg
@@ -203,10 +200,9 @@ def op_restore(what: str = "all", ref: str = "latest", *, yes: bool = False, pro
         lines.append(f"\nNothing changed yet. To apply, run: {cmd}\n"
                      "(A safety snapshot is taken first, so this restore can itself be undone.)")
         return "\n".join(lines)
-    include = st.include_secrets and repo.encrypted
     with repo_lock(S.lock_path(st)):
         safety = create_snapshot(repo, home, label=f"before restoring {selector.describe()} ({sid[:15]})",
-                                 trigger="pre-restore", include_secrets=include, extra_excludes=S.excludes(st))
+                                 trigger="pre-restore", extra_excludes=S.excludes(st))
         res = apply_plan(repo, plan, home)
     kept = _keep_offsite_settings(st)
     lines.append(f"\n✓ Restored {res.written} file(s), removed {res.deleted}. "

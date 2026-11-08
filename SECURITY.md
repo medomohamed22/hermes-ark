@@ -9,7 +9,7 @@
 | Storage provider or anyone with the bucket/USB drive reading your data | AES-256-GCM encryption of every object on this machine before upload |
 | Tampering with the off-site copy | Every encrypted object is authenticated (GCM tag, object id as associated data); a modified object fails to decrypt and `verify` names the affected snapshots |
 | Silent corruption | Blobs are re-hashed on read; `verify` checks every blob a restore needs |
-| Credential leakage through backups | Credential stores are excluded by default; including them requires an encrypted repository |
+| Credential leakage through backups | Hermes credential files (`.env`, `auth.json`, vault, pairing) are never captured, restored or deleted |
 | A prompt-injected agent switching Ark off or deleting backups | Self-defense: such tool calls are refused; disguised ones raise a tamper alarm and Ark puts its settings back |
 
 ## Cryptography
@@ -78,25 +78,27 @@ the agent, so Ark's `tool_execution` middleware now guards Ark itself:
   background job that strikes after the tool returned, so Ark fingerprints itself around every tool call (except
   read-only tools) and a watchdog in the gateway checks every 10 seconds: Ark's settings and enabled state, `ARK_*`
   secrets, the repository key file, its snapshots and data, and Ark's own code. On a change it tells the agent and
-  the user (tool result, `hermes ark status`, Desktop 🚨) and **repairs what it can**: settings, enabled state,
-  secrets, the key file and code are put back, and a fresh snapshot is taken (and pushed) at once.
-- Damage to the backups themselves is always repaired. Changes to settings, enabled state or secrets are put back
-  only **while the agent is active** — within 30 minutes of its last tool call, or while a background process it
-  started is still running; outside that window they are treated as your own change and only logged (ℹ).
+  the user (tool result, `hermes ark status`, Desktop 🚨). **It never overrides your choices**: settings, enabled
+  state, secrets and plugin files are never written back (`hermes plugins disable`, `update` and `remove` always
+  win). The one repair is Ark's own repository key file when an agent tool call deleted it, followed by a fresh
+  snapshot (and push) so backups continue.
+- While the agent is active (within 30 minutes of its last tool call, or while a background process it started is
+  still running) every change raises the alarm; otherwise only damage to the backups does, and other changes are
+  logged as your own (ℹ).
   Ark's own deletions (retention, your `hermes ark prune/forget`) are recorded and never raise an alarm; a deletion
   by another process *during* an agent tool call does, even through Ark's own CLI.
 - A repository fingerprint is kept on disk, so damage done while Hermes was not running is found at the next start.
-- **Quarantine**: a call that damaged Ark (Ark repaired it) is refused if the agent tries the identical call again —
+- **Quarantine**: a call that raised the tamper alarm is refused if the agent tries the identical call again —
   across plugin reloads and restarts, and whatever tool name or timeout the model wraps it in.
-- When something disables Ark, the running gateway unloads it; Ark's watchdog outlives that, re-enables Ark through
-  the public `hermes plugins enable` (which makes the gateway load it again) and falls back to a direct config write.
+- The watchdog stops when the plugin is disabled or unloaded (`ctx.on_unload`), so a disabled Ark is really off.
 - The agent cannot grant itself access: `allow_agent_admin` (off by default) is itself an Ark setting.
 - Snapshots the agent labels via `ark_checkpoint` are pinned only up to the newest 20, so a looping agent cannot fill
   the disk with history retention may never delete. Your own labelled snapshots stay pinned forever.
 
 Limits: an agent with an approved, unrestricted shell runs as your user. A carefully disguised job that waits more
-than 30 minutes after the agent's last action, escapes its process session, and only switches Ark off (without
-touching the backups) is treated as your own change; and nothing local survives deleting both the repository and
+than 30 minutes after the agent's last action and escapes its process session is reported only if it damages the
+backups; switching Ark off is always respected (and alarmed while the agent is active); and nothing local survives
+deleting both the repository and
 Ark's data folder. Off-site copies are the backstop: `push` to storage with object versioning or a retention lock,
 using credentials **without delete permission** (Ark never deletes remotely unless you run `push --mirror`) — then
 even stolen `ARK_S3_*` keys cannot erase your history.

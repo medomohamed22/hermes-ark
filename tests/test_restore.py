@@ -93,13 +93,21 @@ def test_restore_never_deletes_uncaptured_credentials(hermes_home, repo):
     assert (hermes_home / "auth.json").exists()
 
 
-def test_restore_secrets_when_captured(hermes_home, repo):
-    good = create_snapshot(repo, hermes_home, include_secrets=True).snapshot_id
-    (hermes_home / ".env").unlink()
-    plan = plan_restore(repo, good, hermes_home, Selector.parse("secrets"))
-    assert [e["p"] for e in plan.write] == [".env"]
+def test_restore_never_writes_credentials_from_an_older_snapshot(hermes_home, repo, monkeypatch):
+    """A snapshot made by an older Ark with include_secrets still holds .env: it is never written back."""
+    import arkcore.scanner as scanner
+    monkeypatch.setattr(scanner, "_is_secret", lambda rel: False)           # behave like the old option
+    old = create_snapshot(repo, hermes_home).snapshot_id
+    monkeypatch.undo()
+    assert ".env" in {e["p"] for e in repo.load_manifest(old)["files"]}
+    (hermes_home / ".env").write_text("OPENROUTER_API_KEY=new-key\n")
+    (hermes_home / "auth.json").unlink()
+    plan = plan_restore(repo, old, hermes_home, Selector())
+    assert not [e for e in plan.write if e["p"] in (".env", "auth.json", "profiles/work/.env")]
+    assert ".env" not in plan.delete and "auth.json" not in plan.delete
     apply_plan(repo, plan, hermes_home)
-    assert (hermes_home / ".env").read_text().startswith("OPENROUTER_API_KEY")
+    assert (hermes_home / ".env").read_text() == "OPENROUTER_API_KEY=new-key\n"     # untouched
+    assert not (hermes_home / "auth.json").exists()                                  # not resurrected
 
 
 def test_restore_sqlite_database(hermes_home, repo):

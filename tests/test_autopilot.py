@@ -130,8 +130,8 @@ def plugin(hermes_home, monkeypatch):
     sys.modules[name] = pkg
     spec.loader.exec_module(pkg)
     pkg.settings._cache.clear()
+    pkg.auto._ensure_watchdog_real = pkg.auto._ensure_watchdog
     pkg.auto._ensure_watchdog = lambda: None      # tests call watchdog_tick() directly; no stray threads
-    pkg.selfdefense.enable_ark = pkg.selfdefense._save_enabled
     pkg.cli.op_init(no_encryption=False)
     return pkg
 
