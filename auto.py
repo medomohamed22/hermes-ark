@@ -191,7 +191,7 @@ def brain_checkpoint(reason: str) -> Optional[str]:
     # A full snapshot may hold the lock for a while; the agent's memory write must not wait on it.
     with repo_lock(S.lock_path(st), timeout=2):
         res = create_snapshot(repo, S.hermes_home(), label=reason, trigger="auto:pre-write", scope=BRAIN,
-                              include_secrets=False, extra_excludes=S.excludes(st), skip_if_unchanged=True)
+                              extra_excludes=S.excludes(st), skip_if_unchanged=True)
     return res.snapshot_id
 
 
@@ -202,7 +202,7 @@ def full_snapshot(trigger: str = "auto", label: str = "", force_prune: bool = Fa
         return None
     with repo_lock(S.lock_path(st), timeout=60):
         res = create_snapshot(repo, S.hermes_home(), label=label, trigger=trigger,
-                              include_secrets=st.include_secrets and repo.encrypted, extra_excludes=S.excludes(st),
+                              extra_excludes=S.excludes(st),
                               skip_if_unchanged=True)
         now = time.time()
         _update_state(last_full=now, last_full_id=res.snapshot_id)
@@ -521,17 +521,17 @@ def _take_notes() -> list[str]:
     return out
 
 
-def _respond(before: dict, after: dict, *, when: str, deleted: frozenset, repair_scopes: tuple,
+def _respond(before: dict, after: dict, *, when: str, deleted: frozenset, may_repair: bool,
              alarm_scopes: tuple = D.SCOPES) -> Optional[str]:
+    """Raise the tamper alarm. The only repair is Ark's own repository key file, and only when the agent
+    caused the damage (*may_repair*); settings, enabled state, secrets and plugin files are never written."""
     changes = D.tamper_changes(before, after, ark_busy=_full_running.is_set(), deleted_by_ark=deleted,
                                scopes=alarm_scopes)
     if not changes:
         return None
     flat = [c for scope in D.SCOPES for c in changes.get(scope, [])]
-    restored = D.repair(before, after, scopes=tuple(s for s in repair_scopes if s in changes))
-    if "Ark enabled again" in restored:
-        _expect_config["view"] = before.get("config")
-    fresh = D.needs_fresh_snapshot(changes)
+    restored = D.repair(before, after) if may_repair and "repo" in changes else []
+    fresh = may_repair and D.needs_fresh_snapshot(changes)
     logger.warning("Hermes Ark tamper alarm (%s): %s (repaired: %s)", when, "; ".join(flat), restored)
     record_event("tamper", "; ".join(flat) + (f" — repaired {', '.join(restored)}" if restored else ""))
     if fresh:
@@ -539,26 +539,12 @@ def _respond(before: dict, after: dict, *, when: str, deleted: frozenset, repair
     return D.format_tamper(flat, restored, when=when, resnapshot=fresh)
 
 
-_expect_config: dict[str, Any] = {"view": None}
-
-
-def _settle(fp: dict) -> dict:
-    """While Ark re-enables itself in the background, remember the state it is restoring, not the half-way
-    state, so the next check neither re-triggers nor mistakes the restore for a new change."""
-    if _expect_config["view"] is not None:
-        if D._reenabling.is_set():
-            fp = {**fp, "config": _expect_config["view"]}
-        else:
-            _expect_config["view"] = None
-    return fp
-
-
 def watchdog_tick() -> Optional[str]:
-    """Compare Ark with how the agent last left it. Damage to the backups is always repaired; changes to
-    settings, enabled state or secrets are put back only while the agent is active (otherwise they are
-    the user's own and are only logged)."""
+    """Compare Ark with how the agent last left it and raise the tamper alarm on a change. While the agent
+    is active every change is reported; otherwise only damage to the backups is (other changes are the
+    user's own and are logged as info). Nothing the user can change is ever written back."""
     last = D.last_seen()
-    now = _settle(D.fingerprint())
+    now = D.fingerprint()
     if last is None:
         D.remember(now)
         return None
@@ -567,12 +553,12 @@ def watchdog_tick() -> Optional[str]:
         return None
     deleted = _deleted_by_ark(last.get("at", 0), between_calls=True)
     if last.get("_repo_only"):                            # first look after a restart
-        note = _respond(last, now, when="while Hermes was not running", deleted=deleted,
-                        repair_scopes=("repo",), alarm_scopes=("repo",))
+        note = _respond(last, now, when="while Hermes was not running", deleted=deleted, may_repair=False,
+                        alarm_scopes=("repo",))
     elif agent_active():
         known = tuple(s for s in D.SCOPES if s == "repo" or s in last)   # after a reload: no env/code on record
         note = _respond(last, now, when="while the agent was active (a background job or delayed script?)",
-                        deleted=deleted, repair_scopes=("config", "env", "repo"), alarm_scopes=known)
+                        deleted=deleted, may_repair=True, alarm_scopes=known)
         if note:
             cutoff = time.time() - AGENT_WINDOW_S
             with _watch_lock:
@@ -580,42 +566,48 @@ def watchdog_tick() -> Optional[str]:
             for k in suspects:
                 _quarantine_call(k)
     else:
-        note = _respond(last, now, when="while the agent was idle", deleted=deleted, repair_scopes=("repo",),
+        note = _respond(last, now, when="while the agent was idle", deleted=deleted, may_repair=False,
                         alarm_scopes=("repo",))
         other = D.tamper_changes(last, now, ark_busy=True, scopes=("config", "env", "code"))
         if other:
-            record_event("info", "changed while the agent was idle (kept as your own change): "
+            record_event("info", "changed while the agent was idle (your own change): "
                          + "; ".join(c for v in other.values() for c in v))
-    D.remember(_settle(D.fingerprint() if note else now))
+    D.remember(D.fingerprint() if note else now)
     if note:
         _queue_note(note)
     return note
 
 
 _watchdog_started = threading.Event()
+_watchdog_stop = threading.Event()
 WATCHDOG_INTERVAL_S = 10.0
 
 
+def stop_watchdog() -> None:
+    """Called when Hermes unloads the plugin (``ctx.on_unload``)."""
+    _watchdog_stop.set()
+
+
 def _ensure_watchdog() -> None:
-    """Started by the first agent tool call, so only processes that run the agent are watched."""
-    if _watchdog_started.is_set():
+    """Started by the first agent tool call, so only processes that run the agent are watched. It stops
+    as soon as the plugin is unloaded or disabled."""
+    if _watchdog_started.is_set() or _watchdog_stop.is_set():
         return
     with _start_lock:
         if _watchdog_started.is_set():
             return
         _watchdog_started.set()
-        # One watchdog per process. It deliberately outlives an unload of the plugin: when an attacker
-        # disables Ark, the surviving watchdog is what puts it back.
-        if any(t.name == "hermes-ark-watchdog" and t.is_alive() for t in threading.enumerate()):
-            return
 
     def loop():
-        while True:
-            time.sleep(WATCHDOG_INTERVAL_S)
+        while not _watchdog_stop.wait(WATCHDOG_INTERVAL_S):
+            if not D.is_enabled():
+                logger.info("Hermes Ark watchdog: plugin disabled, stopping")
+                break
             try:
                 watchdog_tick()
             except Exception as exc:
                 logger.debug("Hermes Ark watchdog: %s", exc)
+        _watchdog_started.clear()
 
     threading.Thread(target=loop, name="hermes-ark-watchdog", daemon=True).start()
 
@@ -639,12 +631,12 @@ def _tamper_checked(call, tool_name: str = ""):
             after = D.fingerprint()
             note = _respond(before, after, when="during this tool call",
                             deleted=_deleted_by_ark(before.get("at", 0), between_calls=False),
-                            repair_scopes=D.SCOPES)
+                            may_repair=True)
             if note:
                 notes.append(note)
                 _quarantine_call(key)
                 after = D.fingerprint()
-            D.remember(_settle(after))
+            D.remember(after)
         except Exception as exc:
             logger.debug("Hermes Ark tamper check failed: %s", exc)
         if notes:

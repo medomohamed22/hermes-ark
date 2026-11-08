@@ -49,7 +49,8 @@ EXCLUDED_CRON_FILES = frozenset({"ticker_heartbeat", "ticker_last_success"})
 # ``cache/`` at a home root: only durable media / evidence the user cannot regenerate.
 KEPT_CACHE_SUBDIRS = frozenset({"images", "audio", "videos", "documents", "screenshots", "citations", "generated"})
 
-# Credential stores (relative to a home root). Captured only with include_secrets=True.
+# Credential stores (relative to a home root). Never captured, never restored: Hermes owns them, and
+# users back credentials up with `hermes auth` or their own secret manager.
 SECRET_ROOT_FILES = frozenset({
     ".env", "auth.json", "vault.key", "vault.json.enc",
     "bws_cache.json", "bws_cache.enc.json", "op_cache.json", "photon-sidecar.json",
@@ -120,7 +121,15 @@ def _is_secret(rel_in_home: PurePosixPath) -> bool:
     return (len(parts) == 1 and parts[0] in SECRET_ROOT_FILES) or (parts and parts[0] in SECRET_ROOT_DIRS)
 
 
-def scan(root: Path | str, include_secrets: bool = False, extra_excludes: Iterable[str] = (),
+def is_credential(rel: str) -> bool:
+    """Is this backed-up path (``.env``, ``profiles/work/auth.json``, ``pairing/…``) a credential store?"""
+    parts = PurePosixPath(rel).parts
+    if len(parts) >= 3 and parts[0] == "profiles":
+        parts = parts[2:]
+    return bool(parts) and _is_secret(PurePosixPath(*parts))
+
+
+def scan(root: Path | str, extra_excludes: Iterable[str] = (),
          top_dirs: Optional[frozenset] = None) -> Iterator[FileEntry]:
     """Yield every file to capture under *root* (a Hermes home), in a stable order.
 
@@ -148,7 +157,7 @@ def scan(root: Path | str, include_secrets: bool = False, extra_excludes: Iterab
                     continue
                 if rel.parts[:1] == ("desktop-plugins",) and len(rel.parts) == 2 and (child / ".hermes-package.json").exists():
                     continue  # Hermes regenerates package desktop halves; hand-written desktop plugins are kept
-                if _is_secret(rel) and not include_secrets:
+                if _is_secret(rel):
                     continue
                 full_dir = prefix + rel.as_posix()
                 if any(full_dir == e or full_dir.startswith(e + "/") for e in extra):
@@ -160,8 +169,7 @@ def scan(root: Path | str, include_secrets: bool = False, extra_excludes: Iterab
                 full_rel = prefix + rel.as_posix()
                 if _excluded_under_home(rel, False):
                     continue
-                secret = _is_secret(rel)
-                if secret and not include_secrets:
+                if _is_secret(rel):
                     continue
                 if any(full_rel == e or full_rel.startswith(e + "/") for e in extra):
                     continue
@@ -172,7 +180,7 @@ def scan(root: Path | str, include_secrets: bool = False, extra_excludes: Iterab
                     continue
                 if not stat.S_ISREG(st.st_mode):
                     continue
-                yield FileEntry(full_rel, p, st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode), secret)
+                yield FileEntry(full_rel, p, st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode), False)
 
 
 # ---- Classification: what a path *is*, so users can restore "my memory" instead of file paths ----

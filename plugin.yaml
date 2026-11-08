@@ -1,6 +1,6 @@
 name: hermes-ark
-version: "0.6.2"
-description: "Encrypted, versioned backups of your whole Hermes - memory, SOUL, skills, config, cron, sessions and every profile - with item-level restore. Deduplicated snapshots in a repository you control; credentials are never captured unless you opt in and the repository is encrypted."
+version: "0.6.3"
+description: "Encrypted, versioned backups of your whole Hermes - memory, SOUL, skills, config, cron, sessions and every profile - with item-level restore. Deduplicated snapshots in a repository you control; Hermes credential files are never captured."
 author: medomohamed22
 license: MIT
 homepage: https://github.com/medomohamed22/hermes-ark
@@ -15,7 +15,7 @@ provides_middleware:
   - tool_execution
 requires_env:
   - name: ARK_PASSPHRASE
-    description: "Passphrase that encrypts the Ark repository (AES-256-GCM, scrypt). Optional for a local unencrypted repository; required to back up credentials."
+    description: "Passphrase that encrypts the Ark repository (AES-256-GCM, scrypt). Optional for a local unencrypted repository."
     secret: true
   - name: ARK_S3_ACCESS_KEY_ID
     description: "Access key for the S3-compatible off-site bucket (only if `remote` is an s3:// URL)."
@@ -29,11 +29,6 @@ config_schema:
     default: ""
     label: "Repository location"
     description: "Folder that stores snapshots. Empty = <hermes home>/plugin-data/hermes-ark/repo. Use an external drive or a synced folder to keep backups off this disk."
-  include_secrets:
-    type: bool
-    default: false
-    label: "Back up credentials"
-    description: "Also capture .env, auth.json and vault files. Refused unless the repository is encrypted."
   exclude:
     type: list
     default: []

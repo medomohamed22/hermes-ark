@@ -77,7 +77,6 @@ def get(key: str, default: Any = None) -> Any:
 @dataclass
 class Settings:
     repository: Path
-    include_secrets: bool
     exclude: list[str]
     auto: bool = True
     interval_minutes: int = 60
@@ -101,7 +100,6 @@ def load() -> Settings:
     excl = get("exclude", []) or []
     return Settings(
         repository=Path(repo).expanduser() if repo else data_dir() / "repo",
-        include_secrets=bool(get("include_secrets", False)),
         exclude=[str(e) for e in excl if str(e).strip()],
         auto=bool(get("auto_snapshots", True)),
         interval_minutes=_int(get("interval_minutes", 60), 60),

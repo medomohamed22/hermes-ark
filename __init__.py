@@ -35,6 +35,8 @@ def register(ctx) -> None:
         args_hint="[status|snap|list|diff|show|restore|prune]",
     )
     ctx.register_middleware("tool_execution", auto.tool_execution)
+    if hasattr(ctx, "on_unload"):                  # stop the watchdog when Hermes unloads the plugin
+        ctx.on_unload(auto.stop_watchdog)
     ctx.register_hook("on_session_end", auto.on_session_end)
     ctx.register_tool(
         name="ark_checkpoint", toolset="ark", schema=auto.CHECKPOINT_SCHEMA, handler=auto.checkpoint_tool,

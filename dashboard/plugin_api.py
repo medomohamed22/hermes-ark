@@ -78,7 +78,6 @@ def status() -> dict[str, Any]:
         "state": problem or "ready",
         "repository": str(st.repository),
         "encrypted": bool(repo and repo.encrypted),
-        "include_secrets": st.include_secrets,
         "autopilot": {"on": st.auto, "interval_minutes": st.interval_minutes, "health_guard": st.health_guard},
         "remote": {"url": st.remote, "auto_push": st.auto_push, "last_push": ap.get("last_push")},
         "last_verify": ap.get("last_verify"),

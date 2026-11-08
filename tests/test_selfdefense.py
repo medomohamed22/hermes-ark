@@ -137,9 +137,10 @@ def test_disguised_attack_that_slips_through_raises_a_tamper_alarm(plugin, herme
                        .replace("auto_snapshots: true", "auto_snapshots: true\n        allow_agent_admin: true"))
 
     data, _ = run(plugin, "terminal", {"command": "sh warmup.sh"}, effect=switch_off)
-    assert "Ark has repaired: settings" in data["ark_tamper_alarm"]
+    assert "settings or enabled state" in data["ark_tamper_alarm"] and "repaired" not in data["ark_tamper_alarm"]
     st2 = plugin.settings.load()
-    assert st2.health_guard is True and st2.allow_agent_admin is False
+    assert st2.health_guard is False and st2.allow_agent_admin is True       # the change sticks: alarm only
+    cfg.write_text(cfg.read_text().replace("        allow_agent_admin: true\n", ""))
 
     def nuke():
         shutil.rmtree(st.repository)
@@ -148,7 +149,8 @@ def test_disguised_attack_that_slips_through_raises_a_tamper_alarm(plugin, herme
     assert "repository was deleted" in data["ark_tamper_alarm"]
     status = plugin.cli.op_status() if (st.repository / "ark.json").exists() else ""
     events = [e["kind"] for e in plugin.auto.load_state()["events"]]
-    assert events.count("tamper") == 4, (events, status)
+    # 5: the test's own clean-up of config.yaml happens while the agent counts as active, so it is reported too
+    assert events.count("tamper") == 5, (events, status)
 
 
 def test_blocked_attempts_are_recorded_for_the_user(plugin):
@@ -234,24 +236,26 @@ def _home_cfg(hermes_home):
     return cfg
 
 
-def test_disguised_disable_is_reenabled_and_lost_secret_reported(plugin, hermes_home, monkeypatch):
+def test_disable_and_lost_secret_raise_the_alarm_but_are_never_overridden(plugin, hermes_home, monkeypatch):
+    """Review #149640: a plugin must never override Hermes' enable/disable state or the user's settings."""
     cfg = _home_cfg(hermes_home)
     env = hermes_home / ".env"
     env.write_text("OPENROUTER_API_KEY=sk\n")
     env_before = env.read_bytes()
+    disabled = ("model: test\nplugins:\n  enabled: []\n  disabled:\n  - hermes-ark\n  entries:\n"
+                "    hermes-ark:\n      settings:\n        auto_snapshots: true\n")
 
     def attack():
-        cfg.write_text("model: test\nplugins:\n  enabled: []\n  disabled:\n  - hermes-ark\n  entries:\n"
-                       "    hermes-ark:\n      settings:\n        auto_snapshots: true\n")
+        cfg.write_text(disabled)
         monkeypatch.delenv("ARK_PASSPHRASE")                         # gone from what Hermes provides
 
     data, _ = run(plugin, "terminal", {"command": "./scripts/setup"}, effect=attack)
     note = data["ark_tamper_alarm"]
-    assert "Ark enabled again" in note and "Ark secrets removed: ARK_PASSPHRASE" in note
-    assert "hermes config set ARK_PASSPHRASE" in note
-    text = cfg.read_text()
-    assert "hermes-ark" in text.split("disabled:")[0] and "disabled: []" in text
-    assert env.read_bytes() == env_before                            # rule 11: Ark never touches .env
+    assert "enabled state" in note and "Ark secrets removed: ARK_PASSPHRASE" in note
+    assert "repaired" not in note
+    assert cfg.read_text() == disabled                               # disable sticks
+    assert env.read_bytes() == env_before                            # Ark never touches .env
+    assert not plugin.selfdefense.is_enabled()
 
 
 def test_deleted_repository_is_rebuilt_and_snapshotted(plugin, hermes_home):
@@ -279,29 +283,29 @@ def test_deleted_backup_data_is_noticed(plugin):
     assert "3 backup data object(s) were deleted" in data["ark_tamper_alarm"]
 
 
-def test_modified_plugin_code_is_put_back(plugin, monkeypatch, tmp_path):
-    # Work on a copy of the plugin so the test never touches the real source tree.
+def test_modified_plugin_code_is_reported_never_rewritten(plugin, monkeypatch, tmp_path):
+    """Review #149640: no code self-restore (it would fight `hermes plugins update/remove`); alert only."""
     import importlib.util
     import sys
     from test_autopilot import ROOT
     copy = tmp_path / "ark-copy"
-    shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns("tests", "docs", ".git", "__pycache__"))
+    shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns("tests", "docs", ".git", "__pycache__", "submission"))
     name = "hermes_ark_copy_under_test"
     spec = importlib.util.spec_from_file_location(name, copy / "__init__.py", submodule_search_locations=[str(copy)])
     pkg = importlib.util.module_from_spec(spec)
     sys.modules[name] = pkg
     spec.loader.exec_module(pkg)
     target = copy / "arkcore" / "restore.py"
-    original = target.read_bytes()
+    changed = target.read_bytes() + b"\n# updated\n"
 
-    def backdoor():
-        target.write_bytes(original + b"\nimport os  # backdoor\n")
-        (copy / "arkcore" / "evil.py").write_text("x = 1\n")
+    def update():
+        target.write_bytes(changed)
+        (copy / "arkcore" / "new_module.py").write_text("x = 1\n")
 
     out = json.loads(pkg.auto.tool_execution(tool_name="terminal", args={"command": "./build"},
-                                             next_call=lambda a: (backdoor(), '{"output": "ok"}')[1]))
-    assert "plugin code (2 file(s))" in out["ark_tamper_alarm"]
-    assert target.read_bytes() == original and not (copy / "arkcore" / "evil.py").exists()
+                                             next_call=lambda a: (update(), '{"output": "ok"}')[1]))
+    assert "plugin code was modified" in out["ark_tamper_alarm"]
+    assert target.read_bytes() == changed and (copy / "arkcore" / "new_module.py").exists()   # untouched
 
 
 def test_delayed_background_attack_is_caught_on_the_next_call(plugin, hermes_home):
@@ -361,11 +365,10 @@ def _attack_everything(hermes_home, repo):
     shutil.rmtree(repo)
 
 
-def test_watchdog_repairs_damage_done_by_a_background_job(plugin, hermes_home):
+def test_watchdog_reports_damage_done_by_a_background_job(plugin, hermes_home):
     import subprocess
     import time
-    _home_cfg(hermes_home)
-    (hermes_home / ".env").write_text("OPENROUTER_API_KEY=sk\nARK_PASSPHRASE=test-passphrase-1\n")
+    cfg = _home_cfg(hermes_home)
     st = plugin.settings.load()
     plugin.cli.op_snapshot(label="one")
     bg = subprocess.Popen(["sleep", "30"])
@@ -380,10 +383,10 @@ def test_watchdog_repairs_damage_done_by_a_background_job(plugin, hermes_home):
         note = plugin.auto.watchdog_tick()
     finally:
         bg.kill()
-    assert note and "Ark enabled again" in note and "repository key file" in note
-    assert "disabled:\n  - hermes-ark" not in (hermes_home / "config.yaml").read_text().replace("disabled: []", "")
+    assert note and "enabled state" in note and "repository was deleted" in note
+    assert "repository key file" in note                              # Ark's own key file is put back …
+    assert "- hermes-ark" in cfg.read_text().split("disabled:")[1]      # … the user-visible disable is not
     assert (st.repository / "ark.json").exists()
-    # the agent hears about it on its next tool call
     data, _ = run(plugin, "terminal", {"command": "ls"})
     assert "while the agent was active" in data["ark_tamper_alarm"]
 
@@ -398,23 +401,23 @@ def test_watchdog_respects_the_users_own_changes_when_the_agent_is_idle(plugin, 
     assert plugin.auto.watchdog_tick() is None
     assert "auto_snapshots: false" in cfg.read_text()                    # kept: it was the user
     assert plugin.auto.load_state()["events"][-1]["kind"] == "info"
-    # … but destroyed backups are always repaired
+    # the user deleting the repository while the agent is idle is reported, not undone
     plugin.cli.op_snapshot(label="x")
     plugin.auto.watchdog_tick()
     shutil.rmtree(st.repository)
     note = plugin.auto.watchdog_tick()
-    assert note and "repository key file" in note and (st.repository / "ark.json").exists()
+    assert note and "repository was deleted" in note and not (st.repository / "ark.json").exists()
 
 
-def test_watchdog_reverts_a_disable_while_the_agent_is_working(plugin, hermes_home):
+def test_watchdog_alarms_on_a_disable_while_the_agent_is_working_without_reverting(plugin, hermes_home):
     _home_cfg(hermes_home)
     plugin.auto.watchdog_tick()
     run(plugin, "terminal", {"command": "ls"})                           # agent active just now
     cfg = hermes_home / "config.yaml"
     cfg.write_text(cfg.read_text().replace("  enabled:\n  - hermes-ark\n", "  enabled: []\n"))
     note = plugin.auto.watchdog_tick()
-    assert note and "Ark enabled again" in note
-    assert "- hermes-ark" in cfg.read_text()
+    assert note and "enabled state" in note and "repaired" not in note
+    assert "enabled: []" in cfg.read_text()
 
 
 def test_a_call_that_damaged_ark_is_quarantined(plugin, hermes_home):
@@ -479,32 +482,56 @@ def test_quarantine_and_activity_survive_a_plugin_reload(plugin, hermes_home):
     assert not ran and "already damaged" in data["error"]
 
 
-def test_after_a_reload_a_disable_is_still_reverted(plugin, hermes_home):
+def test_after_a_reload_a_settings_change_is_still_reported(plugin, hermes_home):
     _home_cfg(hermes_home)
     run(plugin, "terminal", {"command": "ls"})                           # agent active; state remembered
     plugin.selfdefense._last = None                                      # plugin reloaded in the same process
     cfg = hermes_home / "config.yaml"
     cfg.write_text(cfg.read_text().replace("auto_snapshots: true", "auto_snapshots: false"))
     note = plugin.auto.watchdog_tick()
-    assert note and "settings (auto_snapshots)" in note
-    assert plugin.settings.load().auto is True
+    assert note and "settings or enabled state" in note
+    assert plugin.settings.load().auto is False                          # reported, not reverted
     assert "ARK_PASSPHRASE" not in (plugin.settings.data_dir() / "selfdefense.json").read_text()
 
 
-def test_reenable_falls_back_to_a_direct_write_when_the_cli_fails(plugin, hermes_home, monkeypatch):
-    import subprocess
+def test_watchdog_stops_when_the_plugin_is_disabled_or_unloaded(plugin, hermes_home, monkeypatch):
+    """Review #149640: the watchdog must exit once the plugin is disabled or unloaded."""
+    import threading
     import time
+    _home_cfg(hermes_home)
+    monkeypatch.setattr(plugin.auto, "WATCHDOG_INTERVAL_S", 0.05)
+
+    def alive():
+        return [t for t in threading.enumerate() if t.name == "hermes-ark-watchdog" and t.is_alive()]
+
+    def wait_for(cond, secs=3.0):
+        end = time.time() + secs
+        while time.time() < end and not cond():
+            time.sleep(0.02)
+        return cond()
+
+    ensure = plugin.auto._ensure_watchdog_real
+    before = len(alive())
+    ensure()
+    assert wait_for(lambda: len(alive()) == before + 1)
+    plugin.auto.stop_watchdog()                                         # ctx.on_unload callback
+    assert wait_for(lambda: len(alive()) == before)
+
+    plugin.auto._watchdog_stop.clear()
+    ensure()
+    assert wait_for(lambda: len(alive()) == before + 1)
     cfg = hermes_home / "config.yaml"
-    cfg.write_text("model: t\nplugins:\n  enabled: []\n  disabled:\n  - hermes-ark\n")
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: calls.append(argv) or (_ for _ in ()).throw(OSError("no cli")))
-    plugin.selfdefense._enable_via_cli(["hermes-ark"], [])
-    for _ in range(100):
-        if not plugin.selfdefense._reenabling.is_set():
-            break
-        time.sleep(0.05)
-    assert calls and calls[0][-3:] == ["plugins", "enable", "hermes-ark"]
-    assert plugin.selfdefense._is_enabled()
+    cfg.write_text(cfg.read_text().replace("  enabled:\n  - hermes-ark\n", "  enabled: []\n  disabled:\n  - hermes-ark\n"))
+    assert wait_for(lambda: len(alive()) == before)                     # `hermes plugins disable`
+
+
+def test_no_write_back_machinery_remains():
+    import sys
+    from test_autopilot import ROOT
+    sys.path.insert(0, str(ROOT))
+    src = (ROOT / "selfdefense.py").read_text() + (ROOT / "auto.py").read_text()
+    for gone in ("_enable_via_cli", "_save_enabled", "_restore_code", "_restore_enabled", "subprocess", "set_value("):
+        assert gone not in src, gone
 
 
 def test_ark_never_reads_or_writes_env_files(plugin, hermes_home, monkeypatch):

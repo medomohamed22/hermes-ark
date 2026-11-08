@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .repo import Repository
-from .scanner import classify, scan, skill_roots
+from .scanner import classify, is_credential, scan, skill_roots
 
 KINDS = ("memory", "soul", "skill", "config", "cron", "sessions", "plugin", "secrets", "media", "other")
 _ALIASES = {"memories": "memory", "skills": "skill", "plugins": "plugin", "session": "sessions",
@@ -115,16 +115,18 @@ def plan_restore(repo: Repository, snapshot_id: str, root: Path | str, selector:
     root = Path(root)
     manifest = repo.load_manifest(snapshot_id)
     plan = RestorePlan(snapshot_id, selector)
-    wanted = {e["p"]: e for e in manifest["files"] if selector.matches(e["p"], item=e.get("i"))}
-    current = list(scan(root, include_secrets=bool(manifest.get("secrets")), extra_excludes=extra_excludes))
+    # Credential files are never written back, even from a snapshot taken by an older Ark that captured them.
+    wanted = {e["p"]: e for e in manifest["files"]
+              if not e.get("x") and not is_credential(e["p"]) and selector.matches(e["p"], item=e.get("i"))}
+    current = list(scan(root, extra_excludes=extra_excludes))
     roots = skill_roots([e.rel for e in current] + [e["p"] for e in manifest["files"]])
     for rel, entry in sorted(wanted.items()):
         if _same_as_disk(repo, entry, root / rel):
             plan.unchanged += 1
         else:
             plan.write.append(entry)
-    # Files in scope today that the snapshot did not have. Secrets are only removed when the
-    # snapshot itself captured secrets (otherwise their absence means "not backed up", not "deleted").
+    # Files in scope today that the snapshot did not have. Credential files are never scanned, so they are
+    # never deleted either.
     scope = manifest.get("scope")
     unreadable = set(manifest.get("unreadable") or [])
     for cur in current:

@@ -11,7 +11,7 @@ One over-eager *"clean up your memory"*, a bad update, a dead disk or a reclaime
 |---|---|---|---|
 | Automatic | ✗ manual | ✓ memory & skills | ✓ everything, before every memory/skill write |
 | Catches a wipe as it happens | ✗ | ✗ | ✓ health guard tells the agent *and* you |
-| Encrypted | ✗ (API keys in a plain zip) | ✗ | ✓ AES-256-GCM, credentials excluded by default |
+| Encrypted | ✗ (API keys in a plain zip) | ✗ | ✓ AES-256-GCM; credentials never captured |
 | Off-site (S3 / R2 / B2 / folder) | ✗ | ✗ | ✓ push, pull, new-machine recovery |
 | Deduplicated | ✗ full zip each time | ✓ git | ✓ content-addressed, chunked |
 | Restore one item | ✗ all or nothing | ✓ memory & skills | ✓ memory · SOUL · one skill · config · cron · a file · a profile |
@@ -53,7 +53,7 @@ Then restart the gateway so chats and Telegram load it — and again after every
   when a remote is set, and **pruned** daily: last 10 · hourly for a day · daily for a week · weekly for a month ·
   monthly for a year. Snapshots you name yourself are kept.
 - **`ark_checkpoint` tool** — the agent saves a labelled snapshot before risky changes to Hermes itself.
-- **Self-defense** — a prompt-injected agent cannot prune, delete, reconfigure or switch off Ark: those tool calls are refused, disguised ones raise a tamper alarm and Ark restores its own settings.
+- **Self-defense** — a prompt-injected agent cannot prune, delete, reconfigure or switch off Ark: those tool calls are refused, and disguised ones raise a tamper alarm. Your own changes (disabling, updating or reconfiguring Ark) always stick.
   Restoring is always your decision, never the agent's.
 
 ## Restore — everything, or exactly the piece you lost
@@ -73,7 +73,7 @@ In Desktop: pick a snapshot in the timeline → *Preview restore…* → *Restor
 - A **safety snapshot** is taken before every restore, so a restore can itself be undone.
 - Every blob is fetched and integrity-checked **before the first write** — a damaged backup never leaves a half-restored home.
 - Writes are atomic and never leave the Hermes home (no `..`, no drive letters, no symlink escapes, no setuid bits).
-- The sessions database is only restored while the gateway is stopped. Credentials that were never captured are never deleted.
+- The sessions database is only restored while the gateway is stopped. Hermes credential files (`.env`, `auth.json`, vault, pairing) are never captured, restored or deleted — back them up with `hermes auth` or your own secret manager.
 
 ## Off-site and new machines
 
@@ -115,7 +115,7 @@ a fresh machine can never wipe your off-site copy.
 
 Settings (Desktop *Settings → Plugins → Hermes Ark*, or `config.yaml` under `plugins.entries.hermes-ark.settings`):
 `repository`, `remote`, `s3_endpoint`, `s3_region`, `auto_snapshots`, `interval_minutes`, `health_guard`,
-`auto_push`, `include_secrets`, `exclude`, `keep_last` / `keep_hourly` / `keep_daily` / `keep_weekly` / `keep_monthly`.
+`auto_push`, `exclude`, `allow_agent_admin`, `keep_last` / `keep_hourly` / `keep_daily` / `keep_weekly` / `keep_monthly`.
 
 <p align="center"><img src="docs/media/desktop-light.png" alt="Ark page, light theme" width="720"></p>
 
@@ -134,14 +134,13 @@ Settings (Desktop *Settings → Plugins → Hermes Ark*, or `config.yaml` under 
 
 ## Disclosure
 
-- **Files read:** your Hermes home (and profiles) to back it up. Credential files (`.env`, `auth.json`, vault files,
-  pairing tokens, browser login stores, the Webapp session token) are skipped — read and backed up only if you turn
-  on `include_secrets`, which also requires an encrypted repository. Ark itself never reads `.env` for its own
-  secrets: `ARK_PASSPHRASE` and the S3 keys come through Hermes' secret scope and are never stored or logged.
+- **Files read:** your Hermes home (and profiles) to back it up. Hermes credential files (`.env`, `auth.json`, vault
+  files, pairing tokens, browser login stores, the Webapp session token) are **never** read, captured or restored.
+  `ARK_PASSPHRASE` and the S3 keys come through Hermes' secret scope and are never stored or logged.
 - **Files written:** the repository folder (default `<hermes home>/plugin-data/hermes-ark/repo`) and Ark's own data
-  folder; the Hermes home only on a restore you confirm. Self-defense (below) may also write back Ark's **own**
-  settings and enabled state in `config.yaml` (through Hermes' config API), its repository key file and its own
-  plugin files, each to the value it had before an agent tool call changed it. It never writes secrets.
+  folder; the Hermes home only on a restore you confirm. If an agent tool call deletes Ark's repository key file,
+  Ark puts that one file back and takes a fresh snapshot. It never writes `config.yaml`, secrets or its own plugin
+  files: your enable/disable, settings, `hermes plugins update` and `remove` always win.
 - **Tools:** `tool_execution` middleware on every tool call. For `memory`/`skill_manage` (and edits of Hermes' own
   files) it snapshots before and compares after, adding a note to the result when the health guard fires. For all
   tools it **refuses** calls that would delete, rewrite or reconfigure Ark's backups or settings, or switch Ark off
@@ -149,12 +148,10 @@ Settings (Desktop *Settings → Plugins → Hermes Ark*, or `config.yaml` under 
   damaged Ark. Read-only Ark commands and everything else run unchanged. You can lift this with
   `allow_agent_admin: true`.
 - **Background:** a snapshot thread after sessions (periodic snapshot, retention, auto-push), and a watchdog thread in
-  the process that runs the agent, checking Ark every 10 seconds (a few small file reads).
-- **Subprocess:** only when something disabled Ark while the agent was active, Ark runs
-  `python -m hermes_cli.main plugins enable hermes-ark` once (fixed arguments, no shell) so the running gateway loads
-  it again; it falls back to a direct config write.
+  the process that runs the agent, checking Ark every 10 seconds (a few small file reads). The watchdog stops when
+  the plugin is disabled or unloaded.
 - **Network:** only when you configure an S3 `remote` — HTTPS to that endpoint (plain http only for localhost).
-- No telemetry, no self-updating: restoring Ark's own files only puts back the exact files that were installed.
+- No subprocesses, no telemetry, no self-updating, and Ark never rewrites its own plugin files.
 
 ## Development
 
